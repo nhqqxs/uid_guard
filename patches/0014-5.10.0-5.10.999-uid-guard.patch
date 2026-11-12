@@ -128,26 +128,25 @@ new file mode 100644
 diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
 --- a/drivers/misc/Makefile
 +++ b/drivers/misc/Makefile
-@@ -3,4 +3,7 @@
+@@ -3,3 +3,6 @@
  # Makefile for misc devices that really don't fit anywhere else.
  #
- 
 +# uid_guard：名单注入器，随内核一起编成模块（产物在 dist/ 里）
 +obj-m					+= uid_guard_cfg.o
 +
- obj-$(CONFIG_IBM_ASM)		+= ibmasm/
+ 
 diff --git a/kernel/user.c b/kernel/user.c
 --- a/kernel/user.c
 +++ b/kernel/user.c
-@@ -21,1 +21,4 @@
- #include <linux/proc_ns.h>
+@@ -144,6 +144,120 @@
+ 	kmem_cache_free(uid_cachep, up);
+ }
+ 
 +#include <linux/cred.h>
 +#include <linux/errno.h>
 +#include <linux/uid_guard.h>
-@@ -145,6 +148,116 @@
- }
- 
- /*
++
++/*
 + * Android app 域的 uid 存在性过滤。
 + *
 + * getpriority()/setpriority() 的 PRIO_USER 与 ioprio_get()/ioprio_set() 的
@@ -257,11 +256,10 @@ diff --git a/kernel/user.c b/kernel/user.c
 +}
 +EXPORT_SYMBOL_GPL(uid_guard_set);
 +
-+/*
+ /*
   * Locate the user_struct for the passed UID.  If found, take a ref on it.  The
   * caller must undo that ref with free_uid().
-  *
-@@ -154,6 +267,9 @@
+@@ -154,6 +268,9 @@
  {
  	struct user_struct *ret;
  	unsigned long flags;
