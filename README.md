@@ -10,7 +10,7 @@ app）可以逐个 uid 调用 `getpriority(PRIO_USER)` / `ioprio_get(IOPRIO_WHO_
 ## 组成
 
 ```
-patches/0014-all-all-uid-guard.patch   内核补丁（android12-5.10 ~ android17-6.18）
+patches/0014-5.10.0-5.10.999-uid-guard.patch   内核补丁（android12-5.10）
 module/                                KernelSU / Magisk 模块（名单注入器）
 src/uid_guard_cfg.c                    注入模块源码（与补丁内嵌的 drivers/misc 同源）
 src/Makefile                           仅供独立 Kbuild 树参考（正常不需要）
@@ -51,10 +51,10 @@ app、未安装的 uid）都保持内核原始行为，跨视图一致性成立�
 
 ```sh
 cd <GKI 内核树（common）>
-git apply /path/to/patches/0014-all-all-uid-guard.patch
+git apply /path/to/patches/0014-5.10.0-5.10.999-uid-guard.patch
 ```
 
-补丁适用于 `android12-5.10` 到 `android17-6.18`。想直接编内核，也可以把它放进
+补丁当前只放开 `android12-5.10`（5.10.x）。想直接编内核，也可以把它放进
 [`nhqqxs/GKI_BakaSU_SUSFS`](https://github.com/nhqqxs/GKI_BakaSU_SUSFS) 的
 `custom_patches/` 目录。
 
