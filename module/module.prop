@@ -1,0 +1,6 @@
+id=uid_guard
+name=uid_guard 名单注入器
+version=v1.0.0
+versionCode=1
+author=uid_guard
+description=把 pkgs.conf 中的包名解析为 base uid 并注入内核 uid_guard（需配套 patches/0014 内核补丁）
