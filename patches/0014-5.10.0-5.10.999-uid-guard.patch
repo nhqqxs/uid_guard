@@ -1,0 +1,273 @@
+# uid_guard: 屏蔽 Android app 之间对 uid 存在性的探测
+#
+# 背景：HMA 一类工具隐藏某个第三方应用后，它仍可能在后台运行。检测方（同为
+# 第三方 app）可以逐个 uid 调 getpriority(PRIO_USER)/ioprio_get(WHO_USER)，
+# 用 -ESRCH 与有效 nice 值的差异反推“某个被隐藏的 app 还在跑”。本补丁在
+# find_user() 这唯一汇聚点上做过滤，只对“调用者是 app 侧 + 目标 uid 在名单
+# 里 + 不是自己”的情形返回 NULL，其余（系统域、SystemUI 等 10000+ 的系统
+# AID、未隐藏的 app、未安装的 uid）保持内核原始行为，因此不会出现“全机没有
+# 任何第三方 app 在运行”这类可被指纹化的异常。
+#
+# 名单不编进内核：由 userspace（模块 service.sh）在启动阶段把包名解析成
+# base uid 后，通过 uid_guard_set() 注入；名单为空时本补丁完全不生效。
+# 名单按 base uid 存储，判定时对 uid 取模，天然覆盖同一包在所有用户/工作
+# 资料里的副本。
+#
+# 本补丁同时把名单注入器做成内核树内的模块（drivers/misc/uid_guard_cfg.c，
+# obj-m 无条件编入），因此随内核构建一起产出 uid_guard_cfg.ko（GKI 的
+# dist/ 目录里），不需要单独准备内核树或担心 vermagic 不匹配。
+#
+# 适用：android12-5.10（5.10.x）。文件名里的版本范围只放开 5.10，其他 KMI
+# 的源码上下文虽然一致，但尚未验证编译，需要单独确认后再放宽范围。
+
+diff --git a/include/linux/uid_guard.h b/include/linux/uid_guard.h
+new file mode 100644
+--- /dev/null
++++ b/include/linux/uid_guard.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * uid_guard: 屏蔽 Android app 之间对 uid 存在性的探测
++ *
++ * 名单由 userspace 在启动阶段注入（base uid）。命中名单的 uid，在被其它
++ * app 通过 getpriority()/setpriority()/ioprio_get()/ioprio_set() 的
++ * “按用户”语义查询时会表现为不存在（-ESRCH），与“该 uid 没有可见的
++ * 运行中进程”完全一致；名单之外的一切行为保持原样。
++ *
++ * 名单为空时功能不生效（fail-open）。
++ */
++#ifndef _LINUX_UID_GUARD_H
++#define _LINUX_UID_GUARD_H
++
++#include <linux/types.h>
++
++/* 注入（或覆盖）需要屏蔽的 base uid 名单；返回 0 或 -EINVAL */
++int uid_guard_set(const u32 *uids, u32 count);
++
++#endif /* _LINUX_UID_GUARD_H */
+diff --git a/drivers/misc/uid_guard_cfg.c b/drivers/misc/uid_guard_cfg.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/misc/uid_guard_cfg.c
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * uid_guard_cfg - 把 base uid 名单注入内置的 uid_guard
++ *
++ * 本模块只做“传参”：把 module_param 里的逗号分隔 uid 列表交给
++ * kernel/user.c 中的 uid_guard_set()，不改内核 text、不注册 kprobe。
++ *
++ * 参数权限写 0，因此不会生成 /sys/module/uid_guard_cfg/parameters/uids。
++ */
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/kstrtox.h>
++#include <linux/types.h>
++
++#if defined(__has_include)
++#if __has_include(<linux/uid_guard.h>)
++#include <linux/uid_guard.h>
++#define UID_GUARD_HAVE_HEADER 1
++#endif
++#endif
++#ifndef UID_GUARD_HAVE_HEADER
++/* 未打 0014 补丁的内核树：本地声明，链接/加载由内核侧符号决定 */
++extern int uid_guard_set(const u32 *uids, u32 count);
++#endif
++
++#define UID_GUARD_CFG_MAX	256
++
++static char uids_param[1024] = "";
++module_param_string(uids, uids_param, sizeof(uids_param), 0);
++MODULE_PARM_DESC(uids, "逗号分隔的 base uid 列表");
++
++static int __init uid_guard_cfg_init(void)
++{
++	u32 list[UID_GUARD_CFG_MAX];
++	char *p = uids_param;
++	int n = 0;
++	int ret;
++
++	while (*p && n < UID_GUARD_CFG_MAX) {
++		unsigned int val;
++
++		while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n')
++			p++;
++		if (!*p)
++			break;
++
++		if (kstrtouint(p, 0, &val))
++			break;
++
++		list[n++] = val;
++
++		while (*p && *p != ',' && *p != ' ' && *p != '\t' && *p != '\n')
++			p++;
++	}
++
++	if (!n) {
++		pr_info("uid_guard_cfg: 名单为空，保持功能关闭\n");
++		return 0;
++	}
++
++	ret = uid_guard_set(list, n);
++	pr_info("uid_guard_cfg: 注入 %d 个 base uid，ret=%d\n", n, ret);
++
++	return 0;
++}
++
++static void __exit uid_guard_cfg_exit(void)
++{
++}
++
++module_init(uid_guard_cfg_init);
++module_exit(uid_guard_cfg_exit);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("uid_guard base uid list injector");
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -3,4 +3,7 @@
+ # Makefile for misc devices that really don't fit anywhere else.
+ #
+ 
++# uid_guard：名单注入器，随内核一起编成模块（产物在 dist/ 里）
++obj-m					+= uid_guard_cfg.o
++
+ obj-$(CONFIG_IBM_ASM)		+= ibmasm/
+diff --git a/kernel/user.c b/kernel/user.c
+--- a/kernel/user.c
++++ b/kernel/user.c
+@@ -21,1 +21,4 @@
+ #include <linux/proc_ns.h>
++#include <linux/cred.h>
++#include <linux/errno.h>
++#include <linux/uid_guard.h>
+@@ -145,6 +148,116 @@
+ }
+ 
+ /*
++ * Android app 域的 uid 存在性过滤。
++ *
++ * getpriority()/setpriority() 的 PRIO_USER 与 ioprio_get()/ioprio_set() 的
++ * IOPRIO_WHO_USER 都会经过 find_user()，因此在这里做一次判定即可覆盖这四个
++ * 系统调用：当调用者属于 app 侧（uid >= 10000，含 isolated 的 90000+）且目标
++ * uid 落在注入名单里时返回 NULL，系统调用自然得到 -ESRCH —— 与“该 uid 没有
++ * 可见的运行中进程”完全一致，不会产生额外的可区分性。
++ *
++ * 名单存的是 base uid（user 0 的 app uid）。Android 上同一个包在所有用户和
++ * 工作资料里共享同一个 base uid（uid = base + userId * 100000），所以判定时
++ * 先把 uid 归一化到 base uid，天然覆盖所有用户的副本。
++ *
++ * 名单由 userspace 通过 uid_guard_set() 注入，默认空 => 功能不生效。
++ */
++#define UID_GUARD_MAX		128
++#define UID_GUARD_USER_OFFSET	100000
++#define UID_GUARD_APP_MIN	10000
++
++struct uid_guard_table {
++	u32 count;
++	u32 uids[UID_GUARD_MAX];
++};
++
++static struct uid_guard_table uid_guard_tbl[2];
++static struct uid_guard_table *uid_guard_cur;
++static DEFINE_SPINLOCK(uid_guard_lock);
++
++static inline u32 uid_guard_aid(kuid_t uid)
++{
++	return uid.val % UID_GUARD_USER_OFFSET;
++}
++
++static bool uid_guard_listed(const struct uid_guard_table *tbl, u32 aid)
++{
++	u32 i;
++
++	for (i = 0; i < tbl->count; i++) {
++		if (tbl->uids[i] == aid)
++			return true;
++	}
++
++	return false;
++}
++
++static bool uid_guard_masked(kuid_t uid)
++{
++	struct uid_guard_table *tbl;
++	kuid_t caller = current_uid();
++
++	/* app 查自己（含同进程其它线程）永远放行 */
++	if (uid_eq(uid, caller))
++		return false;
++
++	/* 只有 app 侧的调用者需要被过滤：系统 / root / 内核线程一律放行 */
++	if (uid_guard_aid(caller) < UID_GUARD_APP_MIN)
++		return false;
++
++	tbl = smp_load_acquire(&uid_guard_cur);
++	if (!tbl || !tbl->count)
++		return false;
++
++	return uid_guard_listed(tbl, uid_guard_aid(uid));
++}
++
++/**
++ * uid_guard_set - 注入需要屏蔽的 base uid 名单
++ * @uids: base uid 数组
++ * @count: 数组长度，最多 UID_GUARD_MAX 个
++ *
++ * 允许重复调用，后一次覆盖前一次。返回 0 成功，-EINVAL 参数非法。
++ *
++ * 双缓冲 + 指针替换实现无锁读取：写入方在 spinlock 下填好另一个缓冲区，
++ * 再用 smp_store_release 切换，读取方只会看到完整填好的表。
++ */
++int uid_guard_set(const u32 *uids, u32 count)
++{
++	struct uid_guard_table *tbl;
++	unsigned long flags;
++	u32 i;
++
++	if (!uids || !count || count > UID_GUARD_MAX)
++		return -EINVAL;
++
++	spin_lock_irqsave(&uid_guard_lock, flags);
++
++	tbl = (uid_guard_cur == &uid_guard_tbl[0]) ? &uid_guard_tbl[1]
++						  : &uid_guard_tbl[0];
++	tbl->count = 0;
++
++	for (i = 0; i < count; i++) {
++		u32 aid = uids[i] % UID_GUARD_USER_OFFSET;
++
++		if (aid < UID_GUARD_APP_MIN)
++			continue;
++		if (tbl->count >= UID_GUARD_MAX)
++			break;
++		if (uid_guard_listed(tbl, aid))
++			continue;
++
++		tbl->uids[tbl->count++] = aid;
++	}
++
++	smp_store_release(&uid_guard_cur, tbl);
++	spin_unlock_irqrestore(&uid_guard_lock, flags);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(uid_guard_set);
++
++/*
+  * Locate the user_struct for the passed UID.  If found, take a ref on it.  The
+  * caller must undo that ref with free_uid().
+  *
+@@ -154,6 +267,9 @@
+ {
+ 	struct user_struct *ret;
+ 	unsigned long flags;
++
++	if (unlikely(uid_guard_masked(uid)))
++		return NULL;
+ 
+ 	spin_lock_irqsave(&uidhash_lock, flags);
+ 	ret = uid_hash_find(uid, uidhashentry(uid));
