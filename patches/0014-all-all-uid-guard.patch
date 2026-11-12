@@ -13,8 +13,12 @@
 # 名单按 base uid 存储，判定时对 uid 取模，天然覆盖同一包在所有用户/工作
 # 资料里的副本。
 #
-# 适用：android12-5.10 ~ android17-6.18（六个分支的 find_user() 函数体与
-# 注释块完全一致，故使用 all-all 版本范围）。
+# 本补丁同时把名单注入器做成内核树内的模块（drivers/misc/uid_guard_cfg.c，
+# obj-m 无条件编入），因此随内核构建一起产出 uid_guard_cfg.ko（GKI 的
+# dist/ 目录里），不需要单独准备内核树或担心 vermagic 不匹配。
+#
+# 适用：android12-5.10 ~ android17-6.18（六个分支的 find_user() 与
+# drivers/misc/Makefile 上下文完全一致，故使用 all-all 版本范围）。
 
 diff --git a/include/linux/uid_guard.h b/include/linux/uid_guard.h
 new file mode 100644
@@ -41,6 +45,97 @@ new file mode 100644
 +int uid_guard_set(const u32 *uids, u32 count);
 +
 +#endif /* _LINUX_UID_GUARD_H */
+diff --git a/drivers/misc/uid_guard_cfg.c b/drivers/misc/uid_guard_cfg.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/misc/uid_guard_cfg.c
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * uid_guard_cfg - 把 base uid 名单注入内置的 uid_guard
++ *
++ * 本模块只做“传参”：把 module_param 里的逗号分隔 uid 列表交给
++ * kernel/user.c 中的 uid_guard_set()，不改内核 text、不注册 kprobe。
++ *
++ * 参数权限写 0，因此不会生成 /sys/module/uid_guard_cfg/parameters/uids。
++ */
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/kstrtox.h>
++#include <linux/types.h>
++
++#if defined(__has_include)
++#if __has_include(<linux/uid_guard.h>)
++#include <linux/uid_guard.h>
++#define UID_GUARD_HAVE_HEADER 1
++#endif
++#endif
++#ifndef UID_GUARD_HAVE_HEADER
++/* 未打 0014 补丁的内核树：本地声明，链接/加载由内核侧符号决定 */
++extern int uid_guard_set(const u32 *uids, u32 count);
++#endif
++
++#define UID_GUARD_CFG_MAX	256
++
++static char uids_param[1024] = "";
++module_param_string(uids, uids_param, sizeof(uids_param), 0);
++MODULE_PARM_DESC(uids, "逗号分隔的 base uid 列表");
++
++static int __init uid_guard_cfg_init(void)
++{
++	u32 list[UID_GUARD_CFG_MAX];
++	char *p = uids_param;
++	int n = 0;
++	int ret;
++
++	while (*p && n < UID_GUARD_CFG_MAX) {
++		unsigned int val;
++
++		while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n')
++			p++;
++		if (!*p)
++			break;
++
++		if (kstrtouint(p, 0, &val))
++			break;
++
++		list[n++] = val;
++
++		while (*p && *p != ',' && *p != ' ' && *p != '\t' && *p != '\n')
++			p++;
++	}
++
++	if (!n) {
++		pr_info("uid_guard_cfg: 名单为空，保持功能关闭\n");
++		return 0;
++	}
++
++	ret = uid_guard_set(list, n);
++	pr_info("uid_guard_cfg: 注入 %d 个 base uid，ret=%d\n", n, ret);
++
++	return 0;
++}
++
++static void __exit uid_guard_cfg_exit(void)
++{
++}
++
++module_init(uid_guard_cfg_init);
++module_exit(uid_guard_cfg_exit);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("uid_guard base uid list injector");
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -3,4 +3,7 @@
+ # Makefile for misc devices that really don't fit anywhere else.
+ #
+ 
++# uid_guard：名单注入器，随内核一起编成模块（产物在 dist/ 里）
++obj-m					+= uid_guard_cfg.o
++
+ obj-$(CONFIG_IBM_ASM)		+= ibmasm/
 diff --git a/kernel/user.c b/kernel/user.c
 --- a/kernel/user.c
 +++ b/kernel/user.c
