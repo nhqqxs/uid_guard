@@ -61,11 +61,11 @@ git apply /path/to/patches/0014-all-all-uid-guard.patch
 ### 2. 取出 `uid_guard_cfg.ko`
 
 补丁已经把这个注入器放进内核树（`drivers/misc/uid_guard_cfg.c`，`obj-m` 无条件编入），
-所以**不需要单独准备内核树**：内核构建完成后，`uid_guard_cfg.ko` 会出现在 GKI 的
-`dist/` 目录里，与 `Image`、`Module.symvers` 同级，vermagic 与内核严格一致。
+所以**不需要单独准备内核树**：内核构建完成后，`uid_guard_cfg.ko` 会出现在构建输出里
+（GKI 的 `dist/`，或 Bazel 的 `bazel-bin/common/kernel_aarch64/`），vermagic 与内核严格一致。
 
 ```sh
-ls <内核构建目录>/dist/uid_guard_cfg.ko
+find <内核构建目录> -name uid_guard_cfg.ko
 ```
 
 之所以不用“外部模块 + `make M=`”：Kleaf/Bazel 构建没有传统 Kbuild 树，DDK 预构建的
