@@ -15,6 +15,7 @@ module/                                KernelSU / Magisk 模块（名单注入�
 src/uid_guard_cfg.c                    注入模块源码（与补丁内嵌的 drivers/misc 同源）
 src/Makefile                           仅供独立 Kbuild 树参考（正常不需要）
 build_module_zip.sh                    打包成可刷 zip
+.github/workflows/build-ko.yml         独立构建（官方 GKI + 本补丁，产物在 Actions 里）
 ```
 
 - **hook 在内核补丁里**：避免 text patch / kprobe 的 BL ±128MB 限制与回滚风险。
@@ -71,6 +72,15 @@ find <内核构建目录> -name uid_guard_cfg.ko
 之所以不用“外部模块 + `make M=`”：Kleaf/Bazel 构建没有传统 Kbuild 树，DDK 预构建的
 内核又与自编内核的 vermagic 不一致（sublevel 一变就加载失败）。把注入器编进内核树，
 是唯一能保证 vermagic 严格匹配的做法。
+
+#### 或者：用本仓库的 Actions 构建
+
+Actions 页面手动运行 `Build uid_guard_cfg.ko` 即可，可选填 manifest 月份与 tag 的 r 号；
+它从官方 GKI 源码 + 本仓库补丁编出 `.ko` 并打包成模块 zip。
+
+> **适用范围**：产物只匹配「官方 GKI + 本补丁」的内核。如果你用的是自编内核
+> （SUSFS/BakaSU、自定义 defconfig、伪装 UTS release），大概率会因 vermagic 或
+> `module_layout` CRC 不匹配而加载失败——那种情况请用上面的方式，在自己的内核构建里编。
 
 ### 3. 打包并刷入
 
