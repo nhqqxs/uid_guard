@@ -1,0 +1,155 @@
+name: Build uid_guard_cfg.ko
+
+# 用官方 GKI 源码 + 本仓库的补丁编出 uid_guard_cfg.ko，并打包成模块 zip。
+#
+# 注意适用范围：这里编的是「官方 GKI + 只打 0014 补丁」的内核。
+# 如果你是自编内核（SUSFS/BakaSU、自定义 defconfig、伪装 UTS release），
+# 编出来的 .ko 可能因 vermagic 或 module_layout CRC 不匹配而无法加载，
+# 那种情况请在自己的内核构建流程里编（补丁已经把注入器放进内核树）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      os_patch_level:
+        description: "GKI manifest 月份（例如 2025-12）；留空自动取最新的 common-android12-5.10-*"
+        required: false
+        type: string
+        default: ""
+      revision:
+        description: "发布 tag 的 r 号（例如 115）；留空使用分支 HEAD"
+        required: false
+        type: string
+        default: ""
+      upload_release:
+        description: "构建成功后创建 Release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PATCH: patches/0014-5.10.0-5.10.999-uid-guard.patch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 腾出磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache python3 git curl build-essential \
+            libssl-dev bison flex libelf-dev dwarves
+
+      - name: 下载 repo 工具
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/git-repo"
+          curl -L https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$GITHUB_WORKSPACE/git-repo/repo"
+          chmod 0755 "$GITHUB_WORKSPACE/git-repo/repo"
+          echo "$GITHUB_WORKSPACE/git-repo" >> "$GITHUB_PATH"
+
+      - name: 解析 manifest 分支
+        id: mf
+        run: |
+          set -euo pipefail
+          month="${{ inputs.os_patch_level }}"
+          if [ -z "$month" ]; then
+            month=$(git ls-remote --heads \
+                      https://android.googlesource.com/kernel/manifest \
+                      "refs/heads/common-android12-5.10-*" |
+                    awk -F/ '{print $3}' | sort -V | tail -n1 |
+                    sed 's/^common-android12-5.10-//')
+          fi
+          if [ -z "$month" ]; then
+            echo "::error::无法确定 manifest 月份，请手动填写 os_patch_level"
+            exit 1
+          fi
+          echo "month=$month" >> "$GITHUB_OUTPUT"
+          echo "branch=common-android12-5.10-$month" >> "$GITHUB_OUTPUT"
+          echo "manifest 分支: common-android12-5.10-$month"
+
+      - name: repo init / sync
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/gki"
+          cd "$GITHUB_WORKSPACE/gki"
+          repo init --depth=1 \
+            -u https://android.googlesource.com/kernel/manifest \
+            -b "${{ steps.mf.outputs.branch }}" \
+            --repo-rev=v2.16
+
+          rev="${{ inputs.revision }}"
+          if [ -n "$rev" ]; then
+            sed -i "s|revision=\"android12-5.10\"|revision=\"refs/tags/android12-5.10_r${rev}\"|" \
+              .repo/manifests/default.xml
+            echo "使用发布 tag: android12-5.10_r${rev}"
+          fi
+
+          repo sync -c -j"$(nproc --all)" --no-tags --fail-fast
+          awk '/^VERSION = /{v=$3} /^PATCHLEVEL = /{p=$3} /^SUBLEVEL = /{s=$3} END{print "内核版本: " v "." p "." s}' common/Makefile
+
+      - name: 应用 uid_guard 补丁
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/gki/common"
+          git apply --verbose "$GITHUB_WORKSPACE/$PATCH"
+          grep -n "uid_guard_cfg" drivers/misc/Makefile
+
+      - name: 构建内核（Kleaf）
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/gki/common"
+          tools/bazel build --config=fast //common:kernel_aarch64_dist
+
+      - name: 取出 uid_guard_cfg.ko
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          ko=$(find "$GITHUB_WORKSPACE/gki" -name uid_guard_cfg.ko -print -quit)
+          if [ -z "$ko" ]; then
+            echo "::error::没有找到 uid_guard_cfg.ko，下面是全部 .ko 供排查："
+            find "$GITHUB_WORKSPACE/gki" -name '*.ko' | head -50 || true
+            exit 1
+          fi
+          cp "$ko" "$GITHUB_WORKSPACE/dist/"
+          ls -l "$GITHUB_WORKSPACE/dist/"
+
+      - name: 打包模块 zip
+        run: |
+          set -euo pipefail
+          sh "$GITHUB_WORKSPACE/build_module_zip.sh" "$GITHUB_WORKSPACE/dist/uid_guard_cfg.ko"
+          ls -l "$GITHUB_WORKSPACE"/uid_guard_*.zip
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v8
+        with:
+          name: uid_guard-ko-${{ steps.mf.outputs.month }}
+          path: |
+            dist/uid_guard_cfg.ko
+            uid_guard_*.zip
+          if-no-files-found: error
+
+      - name: 创建 Release
+        if: inputs.upload_release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ko-${{ steps.mf.outputs.month }}${{ inputs.revision && format('-r{0}', inputs.revision) || '' }}
+          name: uid_guard_cfg.ko (${{ steps.mf.outputs.month }})
+          body: |
+            由 GitHub Actions 从官方 GKI 源码 + patches/0014 构建。
+            仅适用于「官方 GKI + 本补丁」的内核；自编内核请在自己的构建里编。
+          files: uid_guard_*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
