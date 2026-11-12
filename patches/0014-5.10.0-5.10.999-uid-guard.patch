@@ -49,7 +49,7 @@ diff --git a/drivers/misc/uid_guard_cfg.c b/drivers/misc/uid_guard_cfg.c
 new file mode 100644
 --- /dev/null
 +++ b/drivers/misc/uid_guard_cfg.c
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,88 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * uid_guard_cfg - 把 base uid 名单注入内置的 uid_guard
@@ -89,20 +89,33 @@ new file mode 100644
 +	int ret;
 +
 +	while (*p && n < UID_GUARD_CFG_MAX) {
++		char token[16];
 +		unsigned int val;
++		int len = 0;
 +
 +		while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n')
 +			p++;
 +		if (!*p)
 +			break;
 +
-+		if (kstrtouint(p, 0, &val))
-+			break;
++		/* 先切出单个 token：kstrtouint() 要求整个字符串都是数字，
++		 * 直接把 "10238,10239" 传进去会在逗号处失败。 */
++		while (*p && *p != ',' && *p != ' ' && *p != '\t' && *p != '\n') {
++			if (len < (int)sizeof(token) - 1)
++				token[len++] = *p;
++			p++;
++		}
++		token[len] = '\0';
++
++		if (!len)
++			continue;
++
++		if (kstrtouint(token, 0, &val)) {
++			pr_warn("uid_guard_cfg: 忽略无法解析的项 '%s'\n", token);
++			continue;
++		}
 +
 +		list[n++] = val;
-+
-+		while (*p && *p != ',' && *p != ' ' && *p != '\t' && *p != '\n')
-+			p++;
 +	}
 +
 +	if (!n) {
