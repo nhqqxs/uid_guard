@@ -12,13 +12,14 @@ app）可以逐个 uid 调用 `getpriority(PRIO_USER)` / `ioprio_get(IOPRIO_WHO_
 ```
 patches/0014-all-all-uid-guard.patch   内核补丁（android12-5.10 ~ android17-6.18）
 module/                                KernelSU / Magisk 模块（名单注入器）
-src/uid_guard_cfg.c                    注入模块源码（只传参，不做 hook）
-src/Makefile
+src/uid_guard_cfg.c                    注入模块源码（与补丁内嵌的 drivers/misc 同源）
+src/Makefile                           仅供独立 Kbuild 树参考（正常不需要）
 build_module_zip.sh                    打包成可刷 zip
 ```
 
 - **hook 在内核补丁里**：避免 text patch / kprobe 的 BL ±128MB 限制与回滚风险。
 - **注入在模块里**：AK3 内核包保持通用可分发，名单不编进 `Image`，改名单不用重编内核。
+- **注入器随内核构建**：补丁把它作为 `obj-m` 放进内核树，产物 `.ko` 在 `dist/` 里，vermagic 严格匹配。
 
 ## 原理
 
@@ -57,22 +58,24 @@ git apply /path/to/patches/0014-all-all-uid-guard.patch
 [`nhqqxs/GKI_BakaSU_SUSFS`](https://github.com/nhqqxs/GKI_BakaSU_SUSFS) 的
 `custom_patches/` 目录。
 
-### 2. 编译注入模块
+### 2. 取出 `uid_guard_cfg.ko`
 
-内核树必须**已经完整构建过**（`Module.symvers` 存在），否则链接会报 `module_layout`
-一类错误；只跑 `make modules_prepare` 不够。
+补丁已经把这个注入器放进内核树（`drivers/misc/uid_guard_cfg.c`，`obj-m` 无条件编入），
+所以**不需要单独准备内核树**：内核构建完成后，`uid_guard_cfg.ko` 会出现在 GKI 的
+`dist/` 目录里，与 `Image`、`Module.symvers` 同级，vermagic 与内核严格一致。
 
 ```sh
-cd src
-make -C <GKI 内核树（common）> \
-     M="$PWD" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-     modules
+ls <内核构建目录>/dist/uid_guard_cfg.ko
 ```
+
+之所以不用“外部模块 + `make M=`”：Kleaf/Bazel 构建没有传统 Kbuild 树，DDK 预构建的
+内核又与自编内核的 vermagic 不一致（sublevel 一变就加载失败）。把注入器编进内核树，
+是唯一能保证 vermagic 严格匹配的做法。
 
 ### 3. 打包并刷入
 
 ```sh
-sh build_module_zip.sh src/uid_guard_cfg.ko
+sh build_module_zip.sh <内核构建目录>/dist/uid_guard_cfg.ko
 # 产出 uid_guard_<version>.zip
 ```
 
