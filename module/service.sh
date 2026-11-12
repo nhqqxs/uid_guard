@@ -106,6 +106,10 @@ if ! insmod "$KO" uids="$LIST" 2>>"$LOG"; then
 	fi
 fi
 
+# 把模块自己的日志落到文件里，便于确认名单是否真的进了内核
+# （成功时应有 "注入 N 个 base uid，ret=0"；名单为空时会是 "名单为空，保持功能关闭"）
+dmesg 2>/dev/null | grep "uid_guard_cfg" | tail -2 >> "$LOG"
+
 # 注入完成后可以选择卸载配置模块，进一步减少常驻痕迹。
 # 注意：卸载后名单仍在（已经写进内核），下次改名单需要重新加载本模块。
 # rmmod uid_guard_cfg 2>/dev/null
