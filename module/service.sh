@@ -160,8 +160,12 @@ if [ "$loaded" -eq 0 ]; then
 	fi
 fi
 
-# 把模块自己的日志落到文件里，便于确认名单是否真的进了内核
-# （成功时应有 "注入 N 个 base uid，ret=0"；名单为空时会是 "名单为空，保持功能关闭"）
+# 把模块自己的日志落到文件里，便于确认名单是否真的进了内核。
+# 内核在 syslog 模式下会把非 ASCII 字节转义成 \xNN，所以模块里的 pr_*
+# 字符串一律用英文；出现中文说明是旧版 .ko，日志会变成
+#   uid_guard_cfg: \xe6\xb3\xa8\xe5\x85\xa5 11 \xe4\xb8\xaa base uid...
+# 成功时应看到 "injected N base uids, ret=0"，名单为空时是
+# "list is empty, staying disabled"。
 dmesg 2>/dev/null | grep "uid_guard_cfg" | tail -2 >> "$LOG"
 
 # 注入完成后可以选择卸载配置模块，进一步减少常驻痕迹。
