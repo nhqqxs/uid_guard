@@ -121,10 +121,26 @@ sh build_module_zip.sh <内核构建目录>/dist/uid_guard_cfg.ko
 
 1. 先刷内核（含补丁的 AK3 / boot 镜像）；
 2. 再刷 `uid_guard_*.zip`；
-3. 编辑 `/data/adb/modules/uid_guard/pkgs.conf`；
+3. 编辑 `/data/adb/uid_guard/pkgs.conf`；
 4. 重启；或直接 `su -c sh /data/adb/modules/uid_guard/service.sh` 立即生效。
 
 ## pkgs.conf
+
+**实际读取的名单是 `/data/adb/uid_guard/pkgs.conf`**，不在模块目录里。
+刷入新版本会整包替换 `/data/adb/modules/uid_guard`，放在里面的配置必然被
+默认值覆盖，所以名单被挪到了模块目录之外：升级、卸载重装都不会动它。
+
+模块目录里的 `module/pkgs.conf` 只作首次安装的初始模板。安装时
+`customize.sh` 按三种情况处理：
+
+| 情况 | 行为 |
+|---|---|
+| 外部名单已存在 | 原样保留，不动 |
+| 旧版名单在模块目录里 | 复制到外部（自动迁移，无需手动搬） |
+| 两者都没有 | 用模板生成默认名单 |
+
+`service.sh` 里也做了同样的兜底：外部名单不存在且模块内有模板时会自动
+复制一次，因此即使绕过安装器直接替换文件也能正常迁移。
 
 ```text
 # 每行一个包名，与 HMA 的隐藏列表保持一致
