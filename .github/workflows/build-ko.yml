@@ -1,25 +1,29 @@
 name: Build uid_guard_cfg.ko
 
-# 用官方 GKI 源码 + 本仓库的补丁编出 uid_guard_cfg.ko，并打包成模块 zip。
+# 单独编出 uid_guard_cfg.ko（不打内核补丁，也不需要改内核树）。
 #
-# 注意适用范围：这里编的是「官方 GKI + 只打 0014 补丁」的内核。
-# 如果你是自编内核（SUSFS/BakaSU、自定义 defconfig、伪装 UTS release），
-# 编出来的 .ko 可能因 vermagic 或 module_layout CRC 不匹配而无法加载，
-# 那种情况请在自己的内核构建流程里编（补丁已经把注入器放进内核树）。
+# 为什么能不打补丁：模块用一次性 kprobe 按名字找 uid_guard_set，编译期
+# 不引用该符号，所以 Module.symvers 里有没有它都无所谓。补丁只需要打在
+# **目标内核**上（提供函数本体），与编译无关。
+#
+# 为什么仍然要编内核：外部模块编译需要 Module.symvers（每个导出符号的
+# CRC）和 include/generated/，这两样只能由 modpost 阶段产出，而官方 GKI
+# 只发布 Image，不发符号表。所以首次必须编一次内核，之后靠缓存跳过。
+#
+# 产物适用范围：同 KMI（android12-5.10）内的任意 5.10.x GKI 内核。GKI 保证
+# KMI 内 module_layout 等符号的 CRC 稳定，vermagic 里的版本号部分又会被
+# same_magic() 跳过（CONFIG_MODVERSIONS=y 时只比对
+# "SMP preempt mod_unload modversions aarch64"），所以用 5.10.198 的树
+# 编出来的 .ko 在 5.10.272 上照样能加载。
 
 on:
   workflow_dispatch:
     inputs:
-      os_patch_level:
-        description: "GKI manifest 月份（例如 2025-12）；留空自动取最新的 common-android12-5.10-*"
+      force_rebuild_kernel:
+        description: "忽略缓存，强制重新构建内核符号表"
         required: false
-        type: string
-        default: ""
-      revision:
-        description: "发布 tag 的 r 号（例如 115）；留空使用分支 HEAD"
-        required: false
-        type: string
-        default: ""
+        type: boolean
+        default: false
       upload_release:
         description: "构建成功后创建 Release"
         required: false
@@ -31,7 +35,12 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  PATCH: patches/0014-5.10.0-5.10.999-uid-guard.patch
+  # 与 build.config.common 保持一致。缺了它算出的符号 CRC 可能与官方不同，
+  # 模块加载时会报 disagrees about version of symbol。
+  KCFLAGS: "-D__ANDROID_COMMON_KERNEL__"
+  ARCH: arm64
+  LLVM: "1"
+  LLVM_IAS: "1"
 
 jobs:
   build:
@@ -43,14 +52,15 @@ jobs:
 
       - name: 腾出磁盘空间
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
           df -h /
 
       - name: 安装构建依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y ccache python3 git curl build-essential \
-            libssl-dev bison flex libelf-dev dwarves
+            libssl-dev bison flex libelf-dev dwarves zip kmod
 
       - name: 下载 repo 工具
         run: |
@@ -60,25 +70,23 @@ jobs:
           chmod 0755 "$GITHUB_WORKSPACE/git-repo/repo"
           echo "$GITHUB_WORKSPACE/git-repo" >> "$GITHUB_PATH"
 
-      - name: 解析 manifest 分支
+      - name: 解析最新 manifest 分支
         id: mf
         run: |
           set -euo pipefail
-          month="${{ inputs.os_patch_level }}"
+          # 不再让人挑月份：同 KMI 内产物通用，取最新稳定分支即可
+          month=$(git ls-remote --heads \
+                    https://android.googlesource.com/kernel/manifest \
+                    "refs/heads/common-android12-5.10-*" |
+                  awk -F/ '{print $3}' | sort -V | tail -n1 |
+                  sed 's/^common-android12-5.10-//')
           if [ -z "$month" ]; then
-            month=$(git ls-remote --heads \
-                      https://android.googlesource.com/kernel/manifest \
-                      "refs/heads/common-android12-5.10-*" |
-                    awk -F/ '{print $3}' | sort -V | tail -n1 |
-                    sed 's/^common-android12-5.10-//')
-          fi
-          if [ -z "$month" ]; then
-            echo "::error::无法确定 manifest 月份，请手动填写 os_patch_level"
+            echo "::error::无法确定 manifest 月份"
             exit 1
           fi
           echo "month=$month" >> "$GITHUB_OUTPUT"
           echo "branch=common-android12-5.10-$month" >> "$GITHUB_OUTPUT"
-          echo "manifest 分支: common-android12-5.10-$month"
+          echo "使用 manifest 分支: common-android12-5.10-$month"
 
       - name: repo init / sync
         run: |
@@ -89,47 +97,76 @@ jobs:
             -u https://android.googlesource.com/kernel/manifest \
             -b "${{ steps.mf.outputs.branch }}" \
             --repo-rev=v2.16
-
-          rev="${{ inputs.revision }}"
-          if [ -n "$rev" ]; then
-            sed -i "s|revision=\"android12-5.10\"|revision=\"refs/tags/android12-5.10_r${rev}\"|" \
-              .repo/manifests/default.xml
-            echo "使用发布 tag: android12-5.10_r${rev}"
-          fi
-
           repo sync -c -j"$(nproc --all)" --no-tags --fail-fast
-          awk '/^VERSION = /{v=$3} /^PATCHLEVEL = /{p=$3} /^SUBLEVEL = /{s=$3} END{print "内核版本: " v "." p "." s}' common/Makefile
+          awk '/^VERSION = /{v=$3} /^PATCHLEVEL = /{p=$3} /^SUBLEVEL = /{s=$3} \
+               END{print "内核版本: " v "." p "." s}' common/Makefile
 
-      - name: 应用 uid_guard 补丁
+      - name: 恢复内核符号表缓存
+        id: kcache
+        if: inputs.force_rebuild_kernel == false
+        uses: actions/cache@v4
+        with:
+          # 只缓存编外部模块真正需要的东西：.config、符号表、生成的头文件。
+          # 不缓存整个 out/，那有几十 GB。
+          path: |
+            out/.config
+            out/Module.symvers
+            out/include/generated
+            out/arch/arm64/include/generated
+            out/scripts
+            out/.scmversion
+          key: gki-kbuild-${{ steps.mf.outputs.month }}-v1
+
+      - name: 构建内核符号表
+        if: steps.kcache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/gki/common"
-          git apply --verbose "$GITHUB_WORKSPACE/$PATCH"
-          grep -n "uid_guard_cfg" drivers/misc/Makefile
-
-      - name: 构建内核（Kleaf）
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/gki/common"
-          tools/bazel build --config=fast //common:kernel_aarch64_dist
-
-      - name: 取出 uid_guard_cfg.ko
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          ko=$(find "$GITHUB_WORKSPACE/gki" -name uid_guard_cfg.ko -print -quit)
-          if [ -z "$ko" ]; then
-            echo "::error::没有找到 uid_guard_cfg.ko，下面是全部 .ko 供排查："
-            find "$GITHUB_WORKSPACE/gki" -name '*.ko' | head -50 || true
+          O="$GITHUB_WORKSPACE/out"
+          make O="$O" gki_defconfig
+          # vmlinux 把 built-in 全部落地，modules 阶段跑 modpost 产出
+          # Module.symvers —— 外部模块编译要的正是这个文件
+          make O="$O" -j"$(nproc --all)" vmlinux modules
+          test -s "$O/Module.symvers" || {
+            echo "::error::没有产出 Module.symvers"
+            ls -l "$O" | head -40
             exit 1
-          fi
+          }
+          echo "Module.symvers 行数: $(wc -l < "$O/Module.symvers")"
+
+      - name: 校验内核产物
+        run: |
+          set -euo pipefail
+          O="$GITHUB_WORKSPACE/out"
+          for f in .config Module.symvers include/generated/autoconf.h \
+                   include/generated/utsrelease.h; do
+            if [ -f "$O/$f" ]; then
+              echo "  OK   $f"
+            else
+              echo "::error::缺少 $f"
+              exit 1
+            fi
+          done
+
+      - name: 编译 uid_guard_cfg.ko
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/gki/common"
+          O="$GITHUB_WORKSPACE/out"
+          make O="$O" M="$GITHUB_WORKSPACE/src" modules
+          ko="$GITHUB_WORKSPACE/src/uid_guard_cfg.ko"
+          test -f "$ko" || { echo "::error::没有产出 uid_guard_cfg.ko"; exit 1; }
+          mkdir -p "$GITHUB_WORKSPACE/dist"
           cp "$ko" "$GITHUB_WORKSPACE/dist/"
           ls -l "$GITHUB_WORKSPACE/dist/"
+          echo "--- modinfo ---"
+          modinfo "$ko" || strings "$ko" | grep -E '^(vermagic|name|license)='
 
       - name: 打包模块 zip
         run: |
           set -euo pipefail
-          sh "$GITHUB_WORKSPACE/build_module_zip.sh" "$GITHUB_WORKSPACE/dist/uid_guard_cfg.ko"
+          sh "$GITHUB_WORKSPACE/build_module_zip.sh" \
+             "$GITHUB_WORKSPACE/dist/uid_guard_cfg.ko"
           ls -l "$GITHUB_WORKSPACE"/uid_guard_*.zip
 
       - name: 上传产物
@@ -145,11 +182,17 @@ jobs:
         if: inputs.upload_release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ko-${{ steps.mf.outputs.month }}${{ inputs.revision && format('-r{0}', inputs.revision) || '' }}
+          tag_name: ko-${{ steps.mf.outputs.month }}
           name: uid_guard_cfg.ko (${{ steps.mf.outputs.month }})
           body: |
-            由 GitHub Actions 从官方 GKI 源码 + patches/0014 构建。
-            仅适用于「官方 GKI + 本补丁」的内核；自编内核请在自己的构建里编。
+            由 GitHub Actions 从官方 GKI 源码编译，**不打内核补丁**。
+
+            模块用一次性 kprobe 按名字查找 `uid_guard_set`，编译期不引用该符号，
+            因此编译用的内核树不需要打 0014 补丁——补丁只需要打在目标内核上。
+
+            适用范围：android12-5.10 KMI 内的任意 5.10.x GKI 内核。GKI 保证 KMI 内
+            `module_layout` 等符号的 CRC 稳定，vermagic 的版本号部分又会被
+            `same_magic()` 跳过，所以跨小版本可以直接加载。
           files: uid_guard_*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
