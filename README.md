@@ -15,7 +15,7 @@ module/                                KernelSU / Magisk 模块（名单注入�
 src/uid_guard_cfg.c                    注入模块源码（与补丁内嵌的 drivers/misc 同源）
 src/Makefile                           仅供独立 Kbuild 树参考（正常不需要）
 build_module_zip.sh                    打包成可刷 zip
-.github/workflows/build-ko.yml         独立构建（官方 GKI + 本补丁，产物在 Actions 里）
+.github/workflows/build-ko.yml         独立构建 .ko（官方 GKI，不打补丁，产物在 Actions 里）
 ```
 
 - **hook 在内核补丁里**：避免 text patch / kprobe 的 BL ±128MB 限制与回滚风险。
@@ -105,12 +105,24 @@ find <内核构建目录> -name uid_guard_cfg.ko
 
 #### 或者：用本仓库的 Actions 构建
 
-Actions 页面手动运行 `Build uid_guard_cfg.ko` 即可，可选填 manifest 月份与 tag 的 r 号；
-它从官方 GKI 源码 + 本仓库补丁编出 `.ko` 并打包成模块 zip。
+Actions 页面手动运行 `Build uid_guard_cfg.ko` 即可，不需要填任何版本参数——它会自动
+取最新的 `common-android12-5.10-*` 分支。
 
-> **适用范围**：产物只匹配「官方 GKI + 本补丁」的内核。如果你用的是自编内核
-> （SUSFS/BakaSU、自定义 defconfig、伪装 UTS release），大概率会因 vermagic 或
-> `module_layout` CRC 不匹配而加载失败——那种情况请用上面的方式，在自己的内核构建里编。
+它**不给内核打补丁**，只做两件事：编一次内核拿到 `Module.symvers`，再用
+`make M=src modules` 编出 `.ko`。之所以能不打补丁，是因为模块用一次性 kprobe 按名字
+查找 `uid_guard_set`，编译期不引用该符号——补丁只需要打在目标内核上。
+
+`Module.symvers` 由 `modpost` 阶段产出，官方 GKI 只发 `Image` 不发符号表，所以首次
+构建仍要编一次内核（约 30 分钟）；结果会按 manifest 分支缓存，之后基本就是同步源码
+加编模块，几分钟完成。勾 `force_rebuild_kernel` 可以强制重编。
+
+> **适用范围**：同 KMI（android12-5.10）内的任意 5.10.x GKI 内核，含自编内核。
+>
+> 原因是 GKI 保证 KMI 内 `module_layout` 等符号的 CRC 稳定，而 vermagic 里的版本号
+> 部分会被 `same_magic()` 跳过——`CONFIG_MODVERSIONS=y` 时它用
+> `strcspn(magic, " ")` 跳过 `UTS_RELEASE`，只比对
+> `SMP preempt mod_unload modversions aarch64`。所以用 5.10.198 的树编出来的 `.ko`
+> 在 5.10.272 上也能加载，SUSFS/BakaSU、伪装 UTS release 的自编内核同样适用。
 
 ### 3. 打包并刷入
 
